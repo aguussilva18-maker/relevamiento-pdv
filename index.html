@@ -488,7 +488,7 @@ td.hb{white-space:nowrap}
     </div>
 
     <div class="out"><button id="out">Cerrar sesión</button></div>
-    <p id="ver" style="text-align:center;font-size:11px;color:var(--muted);margin-top:14px">Versión 24 · 10/11</p>
+    <p id="ver" style="text-align:center;font-size:11px;color:var(--muted);margin-top:14px">Versión 25 · 10/11</p>
   </section>
 
   <section id="vGrillas" class="view" hidden>
@@ -818,8 +818,9 @@ td.hb{white-space:nowrap}
         <div class="gm-leg"><span><i class="ok"></i>Cargado completo</span><span><i class="pa"></i>Cargado parcial</span><span><i></i>Sin cargar</span><span>🎯 con objetivo</span></div>
       </div>
       <div class="step">
-        <h3><span>2</span> Base plana de <b class="gerSelLbl" style="margin-left:4px;color:var(--fizz)"></b> <em class="opt">(opcional si solo cargás objetivos)</em></h3>
-        <input id="gerFile" class="file" type="file" accept=".xlsx,.xls,.csv">
+        <h3><span>2</span> Base plana <em class="opt">(opcional si solo cargás objetivos)</em></h3>
+        <input id="gerFile" class="file" type="file" accept=".xlsx,.xls,.csv" multiple>
+        <p class="hint" style="margin:0">Podés elegir <b>varios archivos juntos</b> (uno por mes, de cualquier año): cada archivo se carga en el mes que tiene la mayor parte de su venta.</p>
       </div>
       <div class="step">
         <h3><span>3</span> Objetivos de <b class="gerSelLbl" style="margin-left:4px;color:var(--fizz)"></b> <em class="opt">(total distri)</em></h3>
@@ -2188,6 +2189,13 @@ function gFlt(D){
            p: D.pk.map(p => (!F.un || p[2] === F.un) && (!F.marca || p[0] === F.marca) && (!F.cal || p[1] === F.cal)) };
 }
 const tOk = r => { const F = GER.f; return (!F.sup || r[0] === F.sup) && (!F.prom || r[1] === F.prom) && (!F.canal || r[2] === F.canal) && (!F.un || r[3] === F.un) && (!F.marca || r[4] === F.marca) && (!F.cal || r[5] === F.cal); };
+function tFromCube(md){
+  const D = md.dims, tm = new Map();
+  for (const a of md.c){ const k = a[1] + "|" + a[2] + "|" + a[3] + "|" + a[4], p = D.pk[a[4]];
+    let x = tm.get(k); if (!x){ x = [D.mesa[a[1]], D.fdv[a[2]], D.canal[a[3]], p[2], p[0], p[1], 0, 0, 0, 0, 0]; tm.set(k, x); }
+    x[6] += a[5]; x[7] += a[6]; x[8] += a[7]; x[9] += a[8]; x[10] += a[9] || 0; }
+  return [...tm.values()];
+}
 function idxTot(ym, k){
   const e = GER.idx.m[ym]; if (!e) return null;
   const i = {hl:6, bu:7, fin:8, pn:9, gan:10}[k]; let s = 0;
@@ -2280,6 +2288,11 @@ async function gerRender(){
   if (!cur){ $("gerCut").textContent = "No se pudo abrir " + ymLabel(ym); return; }
   gerSetup(cur);
   const F = GER.f, nf = noFilt(), obj = nf ? (GER.idx.obj[ym] || null) : null;
+  /* meses cargados con la versión anterior: el filtro de marca/calibre se arma desde su detalle */
+  if (F.marca || F.cal){
+    const leg = yearYms.filter(k => GER.idx.m[k].t.some(r => r[4] == null));
+    (await Promise.all(leg.map(gerMonth))).forEach((md, i) => { if (md) GER.idx.m[leg[i]].t = tFromCube(md); });
+  }
   const filt = [F.sup && tc(F.sup), F.prom && tc(F.prom), F.canal, F.un, F.marca, F.cal].filter(Boolean).join(" · ");
   $("gerCut").innerHTML = `<b>${ymLabel(ym)}</b> · ${full ? "mes completo" : "venta del 1 al " + pad2(D)} · ${filt ? "Filtro: <b>" + esc(filt) + "</b>" : "<b>Total GBA Norte</b>"} · AA = ${ymLabel(ymAA)}${full ? "" : " al " + pad2(D)}`;
 
@@ -2596,7 +2609,7 @@ $("gerUpBtn").addEventListener("click", async () => {
 });
 $("gerUpClose").addEventListener("click", () => $("mGer").hidden = true);
 $("gerGo").addEventListener("click", async () => {
-  const m = $("gerMsg"), file = $("gerFile").files[0], gk = $("gerKeyG").value, admin = $("gerKeyA").value, ym = GUP.ym;
+  const m = $("gerMsg"), files = [...$("gerFile").files], gk = $("gerKeyG").value, admin = $("gerKeyA").value, ym = GUP.ym;
   const ob = {hl: objNum($("gerObjHl").value), cc: objNum($("gerObjCc").value), tbd: objNum($("gerObjTbd").value)};
   const hasObj = ob.hl || ob.cc || ob.tbd;
   m.className = "msg";
@@ -2609,32 +2622,40 @@ $("gerGo").addEventListener("click", async () => {
     let idx = {v:2, m:{}, obj:{}};
     const p = await apiGet("ger_idx");
     if (p && p.data){ try { idx = normIdx(await openData(p, gc)); } catch(e){ throw new Error("La clave gerencial no coincide con la de los meses ya cargados"); } }
-    if (!file && !hasObj && !idx.obj[ym]) throw new Error("Elegí la base plana o cargá algún objetivo");
-    const stamp = {updated:new Date().toISOString()}, done = [];
-    if (file){
-      m.textContent = `Leyendo ${file.name}… puede tardar un poco`;
+    if (!files.length && !hasObj && !idx.obj[ym]) throw new Error("Elegí la base plana o cargá algún objetivo");
+    const stamp = {updated:new Date().toISOString()}, done = [], cargados = [], avisos = [];
+    for (let i = 0; i < files.length; i++){
+      const file = files[i];
+      m.textContent = `Leyendo ${file.name} (${i+1} de ${files.length})… puede tardar un poco`;
       await new Promise(r => setTimeout(r, 30));
       const B = new Map();
       if (!gerParse(await readSheet(file), B, file.name)) throw new Error(file.name + ": no tiene filas de venta");
-      if (!B.has(ym)) throw new Error(`Ese archivo no tiene venta de ${ymLabel(ym)} (trae: ${[...B.keys()].sort().map(ymLabel).join(", ")}). Revisá el mes elegido o el archivo.`);
-      m.textContent = `Guardando ${ymLabel(ym)}…`;
-      const {md, gc: gcl, ie} = gerFinal(B.get(ym));
-      let res = await apiPut(gKey(ym), admin, Object.assign(await sealData(md, gc), stamp));
-      if (!res.ok) throw new Error(res.error || "No se pudo guardar " + ymLabel(ym));
-      res = await apiPut(gcKey(ym), admin, Object.assign(await sealData(gcl, gc), stamp));
-      if (!res.ok) throw new Error(res.error || "No se pudo guardar " + ymLabel(ym));
-      idx.m[ym] = Object.assign(ie, {up:stamp.updated});
-      done.push(`base cargada (${gFull(ym, ie.d) ? "mes completo" : "venta al " + pad2(ie.d)})`);
-      const otros = [...B.keys()].filter(k => k !== ym);
-      if (otros.length) done.push(`el archivo también traía ${otros.map(ymLabel).join(", ")}: no se cargó`);
+      /* cada archivo va al mes con la mayor parte de su venta; si trae unas pocas filas de otro mes, se ignoran */
+      const main = [...B.values()].sort((x, y) => y.n - x.n)[0], k = main.ym;
+      if (cargados.includes(k)) throw new Error(`Hay dos archivos de ${ymLabel(k)}. Elegí uno solo por mes.`);
+      const otros = [...B.values()].filter(x => x !== main);
+      if (otros.length) avisos.push(`${file.name}: se ignoraron ${fmtN(otros.reduce((s, x) => s + x.n, 0))} filas de ${otros.map(x => ymLabel(x.ym)).join(", ")}`);
+      m.textContent = `Guardando ${ymLabel(k)} (${i+1} de ${files.length})…`;
+      const {md, gc: gcl, ie} = gerFinal(main);
+      let res = await apiPut(gKey(k), admin, Object.assign(await sealData(md, gc), stamp));
+      if (!res.ok) throw new Error(res.error || "No se pudo guardar " + ymLabel(k));
+      res = await apiPut(gcKey(k), admin, Object.assign(await sealData(gcl, gc), stamp));
+      if (!res.ok) throw new Error(res.error || "No se pudo guardar " + ymLabel(k));
+      idx.m[k] = Object.assign(ie, {up:stamp.updated});
+      cargados.push(k);
+      /* se guarda el índice después de cada mes, así si se corta no se pierde lo ya cargado */
+      res = await apiPut("ger_idx", admin, Object.assign(await sealData(idx, gc), stamp));
+      if (!res.ok) throw new Error(res.error || "No se pudo guardar el índice");
+      GUP.idx = idx; gerGrid();
     }
+    if (cargados.length) done.push("bases cargadas: " + cargados.sort().map(k => ymLabel(k) + (gFull(k, idx.m[k].d) ? "" : " (al " + pad2(idx.m[k].d) + ")")).join(", "));
     if (hasObj){ idx.obj[ym] = Object.fromEntries(Object.entries(ob).filter(([k, v]) => v)); done.push("objetivos guardados"); }
     else if (idx.obj[ym] && !$("gerObjHl").value && !$("gerObjCc").value && !$("gerObjTbd").value){ delete idx.obj[ym]; done.push("objetivos borrados"); }
     const res = await apiPut("ger_idx", admin, Object.assign(await sealData(idx, gc), stamp));
     if (!res.ok) throw new Error(res.error || "No se pudo guardar el índice");
-    m.className = "msg ok"; m.innerHTML = `¡Listo! ${ymLabel(ym)}: ` + done.join(" · ");
+    m.className = "msg ok"; m.innerHTML = "¡Listo! " + done.join(" · ").replace("objetivos", "objetivos de " + ymLabel(ym)) + (avisos.length ? "<br><small>" + avisos.map(esc).join("<br>") + "</small>" : "");
     GUP.idx = idx; GER.cred = gc; try{ sessionStorage.setItem("nabs_ger", gk); }catch(e){}
-    if (file && ym > (GER.ym || "")) GER.ym = ym;
+    const ult = cargados.sort().pop(); if (ult && ult > (GER.ym || "")) GER.ym = ult;
     $("gerFile").value = ""; $("gerFirst").hidden = true; gerGrid();
     await loadGer(true);
   } catch(err){ console.error(err); m.className = "msg bad"; m.textContent = err.message || "Error al cargar"; }
